@@ -2,7 +2,7 @@ from tkinter import messagebox
 import tkinter as tk
 import customtkinter as ctk
 from PIL import Image
-from transformers import T5ForConditionalGeneration, T5Tokenizer
+from transformers import T5ForConditionalGeneration, T5Tokenizer, WhisperProcessor, WhisperForConditionalGeneration
 import threading
 import sounddevice as sd
 import numpy as np
@@ -11,10 +11,11 @@ import sys
 import struct
 import pvporcupine
 import pyaudio
-from faster_whisper import WhisperModel
+#from faster_whisper import WhisperModel
 from ps_commands import main
 import string
 from help_window import show_info_window
+import torchaudio
 
 import nltk
 #nltk.download('stopwords')
@@ -33,7 +34,11 @@ class VoiceInteractionApp:
             keyword_paths=["Hey-vox/Hey-vox_en.ppn"]  # Path to downloaded wake word model
         )
         
-        self.whisper_model = WhisperModel(model_size_or_path="small", device="cpu", compute_type='int8')
+        
+        self.whisper_processor = WhisperProcessor.from_pretrained("./whisper-small-finetuned1")
+        self.whisper_model = WhisperForConditionalGeneration.from_pretrained(
+            "./whisper-small-finetuned1", use_safetensors=True
+        )
 
         self.t5_model = T5ForConditionalGeneration.from_pretrained("./t5-folder-creation-final-1")
         self.t5_tokenizer = T5Tokenizer.from_pretrained("./t5-folder-creation-final-1")
@@ -302,11 +307,34 @@ class VoiceInteractionApp:
             return None, None
     
     def transcribe_audio(self, audio_data):
-        """Transcribe audio using Faster-Whisper."""
+        """Transcribe audio Hugging Face Whisper Model."""
         print("Transcribing audio...")
         try:
-            segments, _ = self.whisper_model.transcribe(audio_data, beam_size=5, language="en", condition_on_previous_text=False)
-            return " ".join([segment.text for segment in segments])
+            # Preprocess: convert raw audio to input features
+            inputs = self.whisper_processor(audio_data, sampling_rate=16000, return_tensors="pt")
+
+            # Move inputs to same device as model
+            input_features = inputs.input_features.to(self.whisper_model.device)
+
+            attention_mask = inputs.get("attention_mask", None)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(self.whisper_model.device)
+
+            # Force decoder to use English transcription tokens
+            forced_decoder_ids = self.whisper_processor.get_decoder_prompt_ids(language="en", task="transcribe")
+
+            # Generate
+            predicted_ids = self.whisper_model.generate(
+                input_features,
+                attention_mask=attention_mask,
+                forced_decoder_ids=forced_decoder_ids
+            )
+
+            # Decode to text
+            transcription = self.whisper_processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+
+            return transcription
+
         except Exception as e:
             print(f"Error transcribing audio: {e}")
             return None
